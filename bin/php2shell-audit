@@ -1,0 +1,1657 @@
+#!/usr/bin/env php
+<?php
+
+/*
+ * php2shell-audit — read-only exposure & upgrade-readiness auditor for
+ * php2shell (CVE-2026-109618 / CVE-2026-109619).
+ *
+ * Copyright (c) 2026, John Cyrus Mantec Espiritu (@jcyrus28)
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * Guarantees:
+ *   - No network I/O, no file writes, no shell execution, no exploit payloads.
+ *   - Only reads php.ini / FPM pool configs / composer.lock and runtime ini_get() values.
+ *   - Runs on PHP 7.0 – 8.5 with core + json + pcre only.
+ *
+ * No declare(strict_types=1): when piped via "curl ... | php", PHP 7.0-7.3 keep the
+ * shebang as inline output, which makes any declare() a fatal error. The code is
+ * exercised under strict_types by tests/run-tests.php instead.
+ */
+
+// STDOUT/STDERR are undefined when the script itself is read from stdin.
+if (!defined('STDOUT')) {
+    define('STDOUT', fopen('php://stdout', 'wb'));
+}
+if (!defined('STDERR')) {
+    define('STDERR', fopen('php://stderr', 'wb'));
+}
+
+const P2S_VERSION = '1.0.0';
+const P2S_SCHEMA_VERSION = '1.0';
+const P2S_REPO_URL = 'https://github.com/jcyrus28/php2shell-audit';
+
+// First upstream releases containing fixes for both CVEs (released 2026-10-21).
+const P2S_PATCHED_BASELINES = array(
+    '8.2' => '8.2.35',
+    '8.3' => '8.3.36',
+    '8.4' => '8.4.27',
+    '8.5' => '8.5.12',
+);
+
+const P2S_SEVERITY_ORDER = array('CRITICAL', 'HIGH', 'WARNING', 'INFO', 'PASS');
+
+// PHP's compiled-in defaults, used when a directive is absent from an audited php.ini.
+const P2S_INI_DEFAULTS = array(
+    'memory_limit' => '128M',
+    'post_max_size' => '8M',
+    'upload_max_filesize' => '2M',
+    'max_input_vars' => '1000',
+    'max_input_nesting_level' => '64',
+    'max_file_uploads' => '20',
+    'max_multipart_body_parts' => '-1',
+    'file_uploads' => '1',
+    'enable_post_data_reading' => '1',
+    'session.upload_progress.enabled' => '1',
+);
+
+const P2S_OOM_MIN_RATIO = 4.0;
+const P2S_MULTIPART_PARTS_MAX = 150;
+const P2S_MAX_INPUT_VARS_MAX = 1000;
+const P2S_NESTING_MAX = 32;
+const P2S_FPM_MAX_REQUESTS_MAX = 1000;
+
+// ext-* requirements that block or complicate a PHP 8.3/8.4 runtime.
+const P2S_PROBLEM_EXTENSIONS = array(
+    'ext-mcrypt' => array('removed', 'Removed from core in PHP 7.2; PECL build is unmaintained. Port to ext-sodium or ext-openssl.'),
+    'ext-mysql' => array('removed', 'Removed in PHP 7.0. Port to PDO or ext-mysqli.'),
+    'ext-ereg' => array('removed', 'Removed in PHP 7.0. Port to preg_* (PCRE).'),
+    'ext-wddx' => array('removed', 'Removed in PHP 7.4. Replace with JSON or a maintained serializer.'),
+    'ext-interbase' => array('removed', 'Removed from core in PHP 7.4.'),
+    'ext-recode' => array('removed', 'Removed in PHP 7.4. Use ext-iconv or ext-mbstring.'),
+    'ext-imap' => array('unbundled', 'Unbundled to PECL in PHP 8.4; upstream c-client is unmaintained.'),
+    'ext-pspell' => array('unbundled', 'Unbundled to PECL in PHP 8.4.'),
+    'ext-oci8' => array('unbundled', 'Unbundled to PECL in PHP 8.4.'),
+    'ext-ioncube_loader' => array('loader', 'Encoded files need a loader built for each PHP minor; re-encoding may be required.'),
+    'ext-ioncube loader' => array('loader', 'Encoded files need a loader built for each PHP minor; re-encoding may be required.'),
+    'ext-sourceguardian' => array('loader', 'Encoded files need a loader built for each PHP minor; re-encoding may be required.'),
+);
+
+class P2S_UsageError extends InvalidArgumentException
+{
+}
+
+class P2S_Report
+{
+    public $anonymize;
+    public $findings = array();
+    public $runtime = array();
+    public $sources = array('ini' => 'runtime', 'fpm_conf' => 'none', 'composer_lock' => 'none');
+    public $metrics = array();
+    public $directiveSources = array();
+    public $fpmPools = array();
+    public $composer = null;
+    public $secrets = array();
+
+    public function __construct($anonymize)
+    {
+        $this->anonymize = (bool) $anonymize;
+    }
+
+    public function add($id, $severity, $module, $title, $detail = '', $remediation = '')
+    {
+        $this->findings[] = array(
+            'id' => $id,
+            'severity' => $severity,
+            'module' => $module,
+            'title' => $title,
+            'detail' => $detail,
+            'remediation' => $remediation,
+        );
+    }
+
+    public function secret($value)
+    {
+        if (is_string($value) && strlen($value) >= 4) {
+            $this->secrets[$value] = true;
+        }
+    }
+
+    // Sorted by severity, preserving insertion order within a severity (usort is unstable before PHP 8).
+    public function sortedFindings()
+    {
+        $rank = array_flip(P2S_SEVERITY_ORDER);
+        $indexed = array();
+        foreach ($this->findings as $i => $f) {
+            $indexed[] = array($rank[$f['severity']], $i, $f);
+        }
+        usort($indexed, function ($a, $b) {
+            if ($a[0] !== $b[0]) {
+                return $a[0] < $b[0] ? -1 : 1;
+            }
+            return $a[1] < $b[1] ? -1 : ($a[1] > $b[1] ? 1 : 0);
+        });
+        $out = array();
+        foreach ($indexed as $row) {
+            $out[] = $row[2];
+        }
+        return $out;
+    }
+
+    public function counts()
+    {
+        $counts = array();
+        foreach (P2S_SEVERITY_ORDER as $sev) {
+            $counts[$sev] = 0;
+        }
+        foreach ($this->findings as $f) {
+            $counts[$f['severity']]++;
+        }
+        return $counts;
+    }
+
+    public function overallRisk()
+    {
+        $counts = $this->counts();
+        foreach (array('CRITICAL', 'HIGH', 'WARNING') as $sev) {
+            if ($counts[$sev] > 0) {
+                return $sev;
+            }
+        }
+        return 'PASS';
+    }
+
+    public function ciExitCode()
+    {
+        $counts = $this->counts();
+        return ($counts['CRITICAL'] + $counts['HIGH']) > 0 ? 1 : 0;
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * Parsing helpers
+ * --------------------------------------------------------------------- */
+
+function p2s_parse_bytes($value)
+{
+    if ($value === null) {
+        return null;
+    }
+    $v = trim((string) $value);
+    if ($v === '') {
+        return null;
+    }
+    if (!preg_match('/^(-?\d+)\s*([kKmMgG])?/', $v, $m)) {
+        return null;
+    }
+    $n = (int) $m[1];
+    if ($n < 0) {
+        return -1;
+    }
+    $unit = isset($m[2]) ? strtolower($m[2]) : '';
+    switch ($unit) {
+        case 'g':
+            $n *= 1024;
+            // no break
+        case 'm':
+            $n *= 1024;
+            // no break
+        case 'k':
+            $n *= 1024;
+    }
+    return $n;
+}
+
+function p2s_parse_int($value)
+{
+    if ($value === null) {
+        return null;
+    }
+    $v = trim((string) $value);
+    if (!preg_match('/^-?\d+$/', $v)) {
+        return null;
+    }
+    return (int) $v;
+}
+
+function p2s_ini_bool($value)
+{
+    if ($value === null) {
+        return false;
+    }
+    return in_array(strtolower(trim((string) $value)), array('1', 'on', 'yes', 'true'), true);
+}
+
+function p2s_human_bytes($bytes)
+{
+    if ($bytes === null) {
+        return 'unset';
+    }
+    if ($bytes < 0) {
+        return 'unlimited (-1)';
+    }
+    if ($bytes === 0) {
+        return '0 (no limit)';
+    }
+    $units = array('G' => 1073741824, 'M' => 1048576, 'K' => 1024);
+    foreach ($units as $suffix => $size) {
+        if ($bytes >= $size && $bytes % $size === 0) {
+            return ($bytes / $size) . $suffix;
+        }
+    }
+    if ($bytes >= 1048576) {
+        return sprintf('%.1fM', $bytes / 1048576);
+    }
+    return $bytes . ' B';
+}
+
+/**
+ * Line-oriented reader for php.ini and php-fpm pool files.
+ * Returns a list of array(section|null, key, value), or null when unreadable.
+ */
+function p2s_read_ini_entries($file)
+{
+    if (!@is_file($file) || !@is_readable($file)) {
+        return null;
+    }
+    $lines = @file($file, FILE_IGNORE_NEW_LINES);
+    if ($lines === false) {
+        return null;
+    }
+    $entries = array();
+    $section = null;
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === ';' || $line[0] === '#') {
+            continue;
+        }
+        if ($line[0] === '[') {
+            if (preg_match('/^\[\s*([^\]]+?)\s*\]/', $line, $m)) {
+                $section = $m[1];
+            }
+            continue;
+        }
+        $eq = strpos($line, '=');
+        if ($eq === false) {
+            continue;
+        }
+        $key = trim(substr($line, 0, $eq));
+        $val = trim(substr($line, $eq + 1));
+        if ($val !== '' && ($val[0] === '"' || $val[0] === "'")) {
+            $quote = $val[0];
+            $end = strpos($val, $quote, 1);
+            $val = $end === false ? substr($val, 1) : substr($val, 1, $end - 1);
+        } else {
+            $semi = strpos($val, ';');
+            if ($semi !== false) {
+                $val = rtrim(substr($val, 0, $semi));
+            }
+        }
+        if ($key !== '') {
+            $entries[] = array($section, $key, $val);
+        }
+    }
+    return $entries;
+}
+
+function p2s_read_ini_flat($file)
+{
+    $entries = p2s_read_ini_entries($file);
+    if ($entries === null) {
+        return null;
+    }
+    $flat = array();
+    foreach ($entries as $e) {
+        $flat[$e[1]] = $e[2];
+    }
+    return $flat;
+}
+
+function p2s_normalize_php_version($raw)
+{
+    $raw = trim((string) $raw);
+    if (!preg_match('/^v?(\d+)\.(\d+)(?:\.(\d+))?/', $raw, $m)) {
+        return null;
+    }
+    $patch = (isset($m[3]) && $m[3] !== '') ? $m[3] : '0';
+    return array(
+        'raw' => $raw,
+        'full' => $m[1] . '.' . $m[2] . '.' . $patch,
+        'branch' => $m[1] . '.' . $m[2],
+        'suffix' => trim(substr($raw, strlen($m[0]))),
+    );
+}
+
+function p2s_classify_runtime($versionRaw)
+{
+    $v = p2s_normalize_php_version($versionRaw);
+    if ($v === null) {
+        return array('status' => 'unknown', 'version' => null, 'baseline' => null);
+    }
+    if (version_compare($v['full'], '8.2.0', '<')) {
+        return array('status' => 'eol', 'version' => $v, 'baseline' => null);
+    }
+    if (array_key_exists($v['branch'], P2S_PATCHED_BASELINES)) {
+        $baseline = P2S_PATCHED_BASELINES[$v['branch']];
+        $status = version_compare($v['full'], $baseline, '>=') ? 'patched' : 'unpatched';
+        return array('status' => $status, 'version' => $v, 'baseline' => $baseline);
+    }
+    return array('status' => 'newer', 'version' => $v, 'baseline' => null);
+}
+
+function p2s_supports_multipart_body_parts(array $v)
+{
+    $full = $v['full'];
+    switch ($v['branch']) {
+        case '8.0':
+            return version_compare($full, '8.0.28', '>=');
+        case '8.1':
+            return version_compare($full, '8.1.16', '>=');
+        case '8.2':
+            return version_compare($full, '8.2.3', '>=');
+    }
+    return version_compare($full, '8.3.0', '>=');
+}
+
+/* ------------------------------------------------------------------------
+ * Composer constraint evaluation (subset of composer/semver sufficient for require.php)
+ * --------------------------------------------------------------------- */
+
+function p2s_pad_version($v)
+{
+    $parts = explode('.', $v);
+    while (count($parts) < 3) {
+        $parts[] = '0';
+    }
+    return implode('.', $parts);
+}
+
+function p2s_constraint_allows($constraint, $version)
+{
+    $constraint = trim((string) $constraint);
+    if ($constraint === '' || $constraint === '*') {
+        return true;
+    }
+    foreach (preg_split('/\s*\|\|?\s*/', $constraint) as $alternative) {
+        $alternative = trim($alternative);
+        if ($alternative !== '' && p2s_constraint_group_allows($alternative, $version)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function p2s_constraint_group_allows($group, $version)
+{
+    if (preg_match('/^v?(\d+(?:\.\d+){0,3})\s+-\s+v?(\d+(?:\.\d+){0,3})$/', $group, $m)) {
+        if (!version_compare($version, p2s_pad_version($m[1]), '>=')) {
+            return false;
+        }
+        $upper = explode('.', $m[2]);
+        if (count($upper) < 3) {
+            $last = count($upper) - 1;
+            $upper[$last] = (string) ((int) $upper[$last] + 1);
+            return version_compare($version, p2s_pad_version(implode('.', $upper)), '<');
+        }
+        return version_compare($version, p2s_pad_version($m[2]), '<=');
+    }
+    $group = preg_replace('/(>=|<=|<>|!=|==|>|<|=|\^|~)\s+/', '$1', $group);
+    foreach (preg_split('/[\s,]+/', trim($group)) as $atom) {
+        if ($atom !== '' && !p2s_constraint_atom_allows($atom, $version)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function p2s_constraint_atom_allows($atom, $version)
+{
+    $atom = preg_replace('/@[A-Za-z]+$/', '', $atom);
+    if ($atom === '' || $atom === '*') {
+        return true;
+    }
+    if (!preg_match('/^(\^|~|>=|<=|<>|!=|==|=|>|<)?v?(\d+(?:\.(?:\d+|[*xX]))*)/', $atom, $m)) {
+        // Unparseable atoms are treated as permissive to avoid false blockers.
+        return true;
+    }
+    $op = $m[1];
+    $parts = explode('.', $m[2]);
+
+    foreach ($parts as $i => $p) {
+        if ($p === '*' || $p === 'x' || $p === 'X') {
+            $parts = array_slice($parts, 0, $i);
+            if (count($parts) === 0) {
+                return true;
+            }
+            $upper = $parts;
+            $last = count($upper) - 1;
+            $upper[$last] = (string) ((int) $upper[$last] + 1);
+            return version_compare($version, p2s_pad_version(implode('.', $parts)), '>=')
+                && version_compare($version, p2s_pad_version(implode('.', $upper)), '<');
+        }
+    }
+
+    $base = p2s_pad_version(implode('.', $parts));
+    switch ($op) {
+        case '^':
+            $pivot = count($parts) - 1;
+            foreach ($parts as $i => $p) {
+                if ((int) $p !== 0) {
+                    $pivot = $i;
+                    break;
+                }
+            }
+            $upper = array_slice($parts, 0, $pivot);
+            $upper[] = (string) ((int) $parts[$pivot] + 1);
+            return version_compare($version, $base, '>=')
+                && version_compare($version, p2s_pad_version(implode('.', $upper)), '<');
+        case '~':
+            if (count($parts) === 1) {
+                $upper = array((string) ((int) $parts[0] + 1));
+            } else {
+                $upper = array_slice($parts, 0, count($parts) - 1);
+                $last = count($upper) - 1;
+                $upper[$last] = (string) ((int) $upper[$last] + 1);
+            }
+            return version_compare($version, $base, '>=')
+                && version_compare($version, p2s_pad_version(implode('.', $upper)), '<');
+        case '':
+        case '=':
+        case '==':
+            return version_compare($version, $base, '==');
+        case '<>':
+        case '!=':
+            return version_compare($version, $base, '!=');
+        default:
+            return version_compare($version, $base, $op);
+    }
+}
+
+function p2s_constraint_supports_branch($constraint, $branch)
+{
+    return p2s_constraint_allows($constraint, $branch . '.0')
+        || p2s_constraint_allows($constraint, $branch . '.99');
+}
+
+/**
+ * Pure analysis of a decoded composer.lock. Deterministic: all lists sorted by package name.
+ */
+function p2s_analyze_composer_lock(array $lock)
+{
+    $entries = array();
+    foreach (array('packages' => false, 'packages-dev' => true) as $key => $dev) {
+        if (isset($lock[$key]) && is_array($lock[$key])) {
+            foreach ($lock[$key] as $pkg) {
+                if (is_array($pkg) && isset($pkg['name'])) {
+                    $pkg['__dev'] = $dev;
+                    $entries[] = $pkg;
+                }
+            }
+        }
+    }
+    $total = count($entries);
+    if (isset($lock['platform']) && is_array($lock['platform']) && count($lock['platform']) > 0) {
+        $entries[] = array('name' => '(root project)', 'version' => '-', 'require' => $lock['platform'], '__dev' => false);
+    }
+
+    $phpBlockers = array();
+    $abandoned = array();
+    $extBlockers = array();
+    $hasRemovedExt = false;
+
+    foreach ($entries as $pkg) {
+        $name = (string) $pkg['name'];
+        $version = isset($pkg['version']) ? (string) $pkg['version'] : '-';
+        $require = (isset($pkg['require']) && is_array($pkg['require'])) ? $pkg['require'] : array();
+
+        if (isset($require['php']) && is_string($require['php'])) {
+            $constraint = $require['php'];
+            $ok83 = p2s_constraint_supports_branch($constraint, '8.3');
+            $ok84 = p2s_constraint_supports_branch($constraint, '8.4');
+            if (!$ok83 || !$ok84) {
+                $phpBlockers[] = array(
+                    'name' => $name,
+                    'version' => $version,
+                    'php_constraint' => $constraint,
+                    'blocks_php83' => !$ok83,
+                    'blocks_php84' => !$ok84,
+                    'dev' => $pkg['__dev'],
+                );
+            }
+        }
+
+        if (isset($pkg['abandoned']) && $pkg['abandoned'] !== false) {
+            $abandoned[] = array(
+                'name' => $name,
+                'version' => $version,
+                'replacement' => is_string($pkg['abandoned']) ? $pkg['abandoned'] : null,
+                'dev' => $pkg['__dev'],
+            );
+        }
+
+        foreach ($require as $req => $c) {
+            $key = strtolower((string) $req);
+            if (array_key_exists($key, P2S_PROBLEM_EXTENSIONS)) {
+                $info = P2S_PROBLEM_EXTENSIONS[$key];
+                if ($info[0] === 'removed') {
+                    $hasRemovedExt = true;
+                }
+                $extBlockers[] = array(
+                    'name' => $name,
+                    'extension' => $key,
+                    'status' => $info[0],
+                    'note' => $info[1],
+                );
+            }
+        }
+    }
+
+    $byName = function ($a, $b) {
+        return strcmp($a['name'] . (isset($a['extension']) ? $a['extension'] : ''), $b['name'] . (isset($b['extension']) ? $b['extension'] : ''));
+    };
+    usort($phpBlockers, $byName);
+    usort($abandoned, $byName);
+    usort($extBlockers, $byName);
+
+    $blockerCount = count($phpBlockers) + count($abandoned) + count($extBlockers);
+    if ($blockerCount >= 13 || $hasRemovedExt) {
+        $complexity = 'HIGH - STRANGLER FIG RECOMMENDED';
+        $effort = '3-6+ months (incremental Strangler Fig migration)';
+    } elseif ($blockerCount >= 4) {
+        $complexity = 'MODERATE';
+        $effort = '3-8 engineer-weeks';
+    } elseif ($blockerCount >= 1) {
+        $complexity = 'LOW';
+        $effort = '1-2 engineer-weeks';
+    } else {
+        $complexity = 'LOW';
+        $effort = '< 1 engineer-week (runtime bump + regression suite)';
+    }
+    $rationale = sprintf(
+        '%d blocker item(s): %d PHP-constraint, %d abandoned, %d extension%s. Thresholds: 0-3 LOW, 4-12 MODERATE, >=13 or any removed C-extension HIGH.',
+        $blockerCount,
+        count($phpBlockers),
+        count($abandoned),
+        count($extBlockers),
+        $hasRemovedExt ? ' (includes a removed C-extension)' : ''
+    );
+
+    return array(
+        'packages_total' => $total,
+        'php_blockers' => $phpBlockers,
+        'abandoned' => $abandoned,
+        'extension_blockers' => $extBlockers,
+        'blocker_count' => $blockerCount,
+        'complexity' => $complexity,
+        'effort_estimate' => $effort,
+        'rationale' => $rationale,
+    );
+}
+
+/* ------------------------------------------------------------------------
+ * Data collection
+ * --------------------------------------------------------------------- */
+
+function p2s_collect_ini(P2S_Report $r, array $opts, array $v)
+{
+    $values = P2S_INI_DEFAULTS;
+    foreach ($values as $k => $unused) {
+        $r->directiveSources[$k] = 'default';
+    }
+
+    if ($opts['ini'] !== null) {
+        $flat = p2s_read_ini_flat($opts['ini']);
+        if ($flat === null) {
+            throw new P2S_UsageError('Cannot read --ini file: ' . $opts['ini']);
+        }
+        $r->sources['ini'] = 'provided';
+        foreach ($values as $k => $unused) {
+            if (array_key_exists($k, $flat)) {
+                $values[$k] = $flat[$k];
+                $r->directiveSources[$k] = 'ini';
+            }
+        }
+        return $values;
+    }
+
+    $runtime = array();
+    foreach ($values as $k => $unused) {
+        $got = ini_get($k);
+        if ($got !== false) {
+            $runtime[$k] = (string) $got;
+        }
+    }
+
+    $discovered = null;
+    if (PHP_SAPI === 'cli' && !$opts['no-discover']) {
+        $discovered = p2s_discover_fpm_ini($v['branch']);
+    }
+
+    if ($discovered !== null) {
+        $r->secret($discovered['file']);
+        $r->sources['ini'] = 'autodiscovered';
+        $drift = array();
+        foreach ($values as $k => $unused) {
+            if (array_key_exists($k, $discovered['values'])) {
+                $values[$k] = $discovered['values'][$k];
+                $r->directiveSources[$k] = 'ini';
+            } elseif (array_key_exists($k, $runtime)) {
+                $values[$k] = $runtime[$k];
+                $r->directiveSources[$k] = 'runtime';
+            }
+            $cli = array_key_exists($k, $runtime) ? $runtime[$k] : P2S_INI_DEFAULTS[$k];
+            if (p2s_directive_differs($k, $cli, $values[$k])) {
+                $drift[] = sprintf('%s (CLI %s vs FPM %s)', $k, $cli, $values[$k]);
+            }
+        }
+        $label = $r->anonymize ? 'an FPM php.ini' : $discovered['file'];
+        if (count($drift) > 0) {
+            $r->add(
+                'runtime.sapi_drift',
+                'WARNING',
+                'runtime',
+                'CLI and FPM php.ini differ on ' . count($drift) . ' audited directive(s)',
+                'Scanned from the cli SAPI. Auto-discovered ' . $label . ' (plus its conf.d) and audited it instead of CLI values, because FPM is what serves HTTP. Differences: ' . implode('; ', $drift) . '.',
+                'Confirm the FPM values in production, or re-run with --ini=<path to the FPM php.ini>.'
+            );
+        } else {
+            $r->add(
+                'runtime.sapi_drift',
+                'INFO',
+                'runtime',
+                'CLI and auto-discovered FPM php.ini agree on audited directives',
+                'Auto-discovered ' . $label . ' and audited it; no drift from CLI values on the directives this tool checks.'
+            );
+        }
+        return $values;
+    }
+
+    foreach ($values as $k => $unused) {
+        if (array_key_exists($k, $runtime)) {
+            $values[$k] = $runtime[$k];
+            $r->directiveSources[$k] = 'runtime';
+        }
+    }
+    if (PHP_SAPI === 'cli') {
+        $r->add(
+            'runtime.sapi_drift',
+            'WARNING',
+            'runtime',
+            'Audited CLI ini values; FPM php.ini may differ',
+            'This scan ran under the cli SAPI and no FPM php.ini was ' . ($opts['no-discover'] ? 'searched for (--no-discover).' : 'found in common locations.') . ' Distributions ship separate cli/ and fpm/ php.ini files, so memory_limit, post_max_size and upload-progress settings seen here may not match what serves HTTP traffic.',
+            'Re-run with --ini=/etc/php/<version>/fpm/php.ini (or your FPM image\'s php.ini) for an authoritative result.'
+        );
+    }
+    return $values;
+}
+
+function p2s_directive_differs($key, $a, $b)
+{
+    if (in_array($key, array('memory_limit', 'post_max_size', 'upload_max_filesize'), true)) {
+        return p2s_parse_bytes($a) !== p2s_parse_bytes($b);
+    }
+    if (in_array($key, array('file_uploads', 'enable_post_data_reading', 'session.upload_progress.enabled'), true)) {
+        return p2s_ini_bool($a) !== p2s_ini_bool($b);
+    }
+    return trim((string) $a) !== trim((string) $b);
+}
+
+function p2s_discover_fpm_ini($branch)
+{
+    $nodot = str_replace('.', '', $branch);
+    $candidates = array(
+        array('/etc/php/' . $branch . '/fpm/php.ini', '/etc/php/' . $branch . '/fpm/conf.d'),
+        array('/etc/opt/remi/php' . $nodot . '/php.ini', '/etc/opt/remi/php' . $nodot . '/php.d'),
+        array('/usr/local/etc/php/php.ini', '/usr/local/etc/php/conf.d'),
+        array('/opt/homebrew/etc/php/' . $branch . '/php.ini', '/opt/homebrew/etc/php/' . $branch . '/conf.d'),
+        array('/usr/local/etc/php/' . $branch . '/php.ini', '/usr/local/etc/php/' . $branch . '/conf.d'),
+        array('/etc/php.ini', '/etc/php.d'),
+    );
+    $loaded = php_ini_loaded_file();
+    $loadedReal = $loaded !== false ? @realpath($loaded) : false;
+
+    foreach ($candidates as $pair) {
+        $file = $pair[0];
+        if (!@is_file($file) || !@is_readable($file)) {
+            continue;
+        }
+        // The CLI already loaded this file, so it cannot reveal SAPI drift.
+        if ($loadedReal !== false && @realpath($file) === $loadedReal) {
+            continue;
+        }
+        $values = p2s_read_ini_flat($file);
+        if ($values === null) {
+            continue;
+        }
+        $scanned = @glob($pair[1] . '/*.ini');
+        if (is_array($scanned)) {
+            sort($scanned);
+            foreach ($scanned as $extra) {
+                $more = p2s_read_ini_flat($extra);
+                if ($more !== null) {
+                    $values = array_merge($values, $more);
+                }
+            }
+        }
+        return array('file' => $file, 'values' => $values);
+    }
+    return null;
+}
+
+function p2s_load_fpm_pools($file, array &$visited, $depth, array &$pools)
+{
+    $real = @realpath($file);
+    $key = $real === false ? $file : $real;
+    if (isset($visited[$key]) || count($visited) >= 64 || $depth > 3) {
+        return;
+    }
+    $visited[$key] = true;
+    $entries = p2s_read_ini_entries($file);
+    if ($entries === null) {
+        return;
+    }
+    $sections = array();
+    foreach ($entries as $e) {
+        $section = $e[0];
+        $k = $e[1];
+        $val = $e[2];
+        if ($k === 'include') {
+            $pattern = ($val !== '' && $val[0] !== '/') ? dirname($file) . '/' . $val : $val;
+            $matches = @glob($pattern);
+            if (is_array($matches)) {
+                sort($matches);
+                foreach ($matches as $match) {
+                    p2s_load_fpm_pools($match, $visited, $depth + 1, $pools);
+                }
+            }
+            continue;
+        }
+        $name = $section === null ? '(unnamed)' : $section;
+        if (strtolower($name) === 'global') {
+            continue;
+        }
+        if (!isset($sections[$name])) {
+            $sections[$name] = array();
+        }
+        $sections[$name][$k] = $val;
+    }
+    foreach ($sections as $name => $settings) {
+        $isPool = false;
+        foreach ($settings as $k => $unused) {
+            if ($k === 'listen' || $k === 'pm' || strpos($k, 'pm.') === 0 || strpos($k, 'php_') === 0) {
+                $isPool = true;
+                break;
+            }
+        }
+        if ($isPool) {
+            $pools[] = array('name' => (string) $name, 'file' => basename($file), 'settings' => $settings);
+        }
+    }
+}
+
+function p2s_discover_fpm_pool_files($branch)
+{
+    $nodot = str_replace('.', '', $branch);
+    $patterns = array(
+        '/etc/php/' . $branch . '/fpm/pool.d/*.conf',
+        '/etc/opt/remi/php' . $nodot . '/php-fpm.d/*.conf',
+        '/usr/local/etc/php-fpm.d/*.conf',
+        '/opt/homebrew/etc/php/' . $branch . '/php-fpm.d/*.conf',
+        '/usr/local/etc/php/' . $branch . '/php-fpm.d/*.conf',
+        '/etc/php-fpm.d/*.conf',
+        '/etc/php/*/fpm/pool.d/*.conf',
+    );
+    foreach ($patterns as $pattern) {
+        $matches = @glob($pattern);
+        if (!is_array($matches)) {
+            continue;
+        }
+        $readable = array();
+        foreach ($matches as $m) {
+            if (@is_file($m) && @is_readable($m)) {
+                $readable[] = $m;
+            }
+        }
+        if (count($readable) > 0) {
+            sort($readable);
+            return $readable;
+        }
+    }
+    return array();
+}
+
+function p2s_collect_fpm(P2S_Report $r, array $opts, array $v)
+{
+    $files = array();
+    if ($opts['fpm-conf'] !== null) {
+        if (!@is_file($opts['fpm-conf']) || !@is_readable($opts['fpm-conf'])) {
+            throw new P2S_UsageError('Cannot read --fpm-conf file: ' . $opts['fpm-conf']);
+        }
+        $files[] = $opts['fpm-conf'];
+        $r->sources['fpm_conf'] = 'provided';
+    } elseif (!$opts['no-discover']) {
+        $files = p2s_discover_fpm_pool_files($v['branch']);
+        if (count($files) > 0) {
+            $r->sources['fpm_conf'] = 'autodiscovered';
+        }
+    }
+
+    $pools = array();
+    $visited = array();
+    foreach ($files as $file) {
+        $r->secret($file);
+        $r->secret(dirname($file));
+        p2s_load_fpm_pools($file, $visited, 0, $pools);
+    }
+    foreach ($pools as $i => $pool) {
+        $pools[$i]['label'] = $r->anonymize ? 'pool-' . ($i + 1) : '[' . $pool['name'] . '] (' . $pool['file'] . ')';
+    }
+    return $pools;
+}
+
+/**
+ * FPM php_value/php_admin_value/php_flag/php_admin_flag overrides win over php.ini.
+ * Apply an override only when every pool sets the directive to the same value.
+ */
+function p2s_apply_pool_overrides(P2S_Report $r, array &$values, array $pools)
+{
+    if (count($pools) === 0) {
+        return;
+    }
+    foreach ($values as $directive => $unused) {
+        $seen = array();
+        foreach ($pools as $pool) {
+            foreach ($pool['settings'] as $k => $val) {
+                if (preg_match('/^php_(?:admin_)?(?:value|flag)\[\s*([^\]]+?)\s*\]$/', $k, $m) && $m[1] === $directive) {
+                    $seen[$pool['label']] = $val;
+                }
+            }
+        }
+        if (count($seen) === 0) {
+            continue;
+        }
+        $distinct = array();
+        foreach ($seen as $val) {
+            $distinct[strtolower(trim($val))] = $val;
+        }
+        if (count($seen) === count($pools) && count($distinct) === 1) {
+            $values[$directive] = reset($seen);
+            $r->directiveSources[$directive] = 'fpm-pool';
+        } else {
+            $parts = array();
+            foreach ($seen as $label => $val) {
+                $parts[] = $label . '=' . $val;
+            }
+            $r->add(
+                'fpm.override_divergence',
+                'WARNING',
+                'fpm',
+                'FPM pools override ' . $directive . ' inconsistently',
+                'Pool-level overrides: ' . implode(', ', $parts) . ' (' . count($pools) . ' pool(s) total). The php.ini value was audited; pools without an override inherit it.',
+                'Audit each pool separately (one --fpm-conf per pool) or align the override across pools.'
+            );
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * Audit modules
+ * --------------------------------------------------------------------- */
+
+function p2s_module_runtime(P2S_Report $r, array $cls, $sapi)
+{
+    $v = $cls['version'];
+    $r->runtime = array(
+        'php_version' => $v['raw'],
+        'branch' => $v['branch'],
+        'sapi' => $sapi,
+        'status' => $cls['status'],
+        'patched_baseline' => $cls['baseline'],
+    );
+    $vendorNote = $v['suffix'] !== ''
+        ? ' The version string carries a vendor suffix ("' . $v['suffix'] . '"): distribution or commercial packages (Ubuntu/Debian security, RHEL, TuxCare ELS) can backport fixes without changing the upstream number, so confirm with your vendor advisory.'
+        : '';
+    $patchList = implode(' / ', array_values(P2S_PATCHED_BASELINES));
+
+    switch ($cls['status']) {
+        case 'eol':
+            $r->add(
+                'runtime.eol',
+                'CRITICAL',
+                'runtime',
+                'PHP ' . $v['full'] . ' is EOL - No Upstream Patch Available',
+                'php2shell (CVE-2026-109618 OOM longjmp state corruption, CVE-2026-109619 stale multipart request state; CVSS 9.2) affects every branch back to PHP 5.4. Upstream fixed only ' . $patchList . ' on 2026-10-21; the ' . $v['branch'] . ' branch will not receive a fix.' . $vendorNote,
+                'Upgrade to PHP 8.4.27+ (or 8.3.36+). Until then: edge containment (./configs/nginx-multipart-guard.conf, ./configs/cloudflare-waf-rules.json), FPM hardening (./configs/php-fpm-hardening.ini), and isolate public routes per ./docs/STRANGLER_FIG_RFC_TEMPLATE.md.'
+            );
+            break;
+        case 'unpatched':
+            $r->add(
+                'runtime.unpatched',
+                'HIGH',
+                'runtime',
+                'Unpatched Runtime: PHP ' . $v['full'] . ' < ' . $cls['baseline'],
+                'The ' . $v['branch'] . ' branch received php2shell fixes in ' . $cls['baseline'] . ' (2026-10-21). This runtime predates it and remains exposed to CVE-2026-109618 and CVE-2026-109619.' . $vendorNote,
+                'Upgrade to PHP ' . $cls['baseline'] . ' or later, then reload PHP-FPM so every worker runs the patched binary.'
+            );
+            break;
+        case 'patched':
+            $r->add(
+                'runtime.patched',
+                'PASS',
+                'runtime',
+                'PHP ' . $v['full'] . ' includes the php2shell fixes (>= ' . $cls['baseline'] . ')',
+                'Configuration checks below are defence-in-depth for this runtime.'
+            );
+            break;
+        default:
+            $r->add(
+                'runtime.newer',
+                'PASS',
+                'runtime',
+                'PHP ' . $v['full'] . ' is newer than every known php2shell baseline',
+                'Branch ' . $v['branch'] . ' was released after the 2026-10-21 fixes (' . $patchList . '). Verify against https://www.php.net/ChangeLog-8.php.'
+            );
+    }
+}
+
+function p2s_module_oom(P2S_Report $r, array $values)
+{
+    $mem = p2s_parse_bytes($values['memory_limit']);
+    $post = p2s_parse_bytes($values['post_max_size']);
+    $upload = p2s_parse_bytes($values['upload_max_filesize']);
+    $vars = p2s_parse_int($values['max_input_vars']);
+    $nesting = p2s_parse_int($values['max_input_nesting_level']);
+
+    $ratio = null;
+    if ($mem !== null && $post !== null && $mem > 0 && $post > 0) {
+        $ratio = round($mem / $post, 2);
+    }
+    $r->metrics['memory_limit_bytes'] = $mem;
+    $r->metrics['post_max_size_bytes'] = $post;
+    $r->metrics['upload_max_filesize_bytes'] = $upload;
+    $r->metrics['oom_headroom_ratio'] = $ratio;
+    $r->metrics['max_input_vars'] = $vars;
+    $r->metrics['max_input_nesting_level'] = $nesting;
+
+    $expansion = 'Request bodies are materialised into Zend HashTables ($_POST, $_FILES, nested arrays) that typically occupy 3x-8x the raw payload. A body near post_max_size can exhaust memory_limit mid-parse and trigger the OOM bailout (longjmp) that CVE-2026-109618 turns into heap/state corruption.';
+    $fix = 'Keep memory_limit / post_max_size >= 4 (8+ preferred): cap post_max_size at 8M on public pools and route large uploads to a dedicated pool. See ./configs/php-fpm-hardening.ini.';
+
+    if ($mem === null || $post === null) {
+        $r->add('oom.unparseable', 'WARNING', 'cve-2026-109618', 'Could not parse memory_limit or post_max_size', 'memory_limit=' . $values['memory_limit'] . ', post_max_size=' . $values['post_max_size'] . '.', 'Use integer byte values with optional K/M/G suffixes.');
+    } else {
+        if ($mem < 0) {
+            $r->add('oom.memory_unlimited', 'CRITICAL', 'cve-2026-109618', 'memory_limit = -1 (unlimited)', 'An unbounded memory_limit lets a single request balloon until the kernel OOM-killer or a mid-request Zend bailout intervenes; neither path cleans up request state safely. ' . $expansion, $fix);
+        }
+        if ($post === 0) {
+            $r->add('oom.post_unlimited', 'CRITICAL', 'cve-2026-109618', 'post_max_size = 0 (no body size limit)', 'PHP will parse arbitrarily large request bodies into memory. ' . $expansion, $fix);
+        }
+        if ($mem > 0 && $post > 0) {
+            $math = sprintf('OOM headroom ratio = memory_limit / post_max_size = %s / %s = %.2f (minimum %.1f).', p2s_human_bytes($mem), p2s_human_bytes($post), $mem / $post, P2S_OOM_MIN_RATIO);
+            if ($post >= $mem) {
+                $r->add('oom.headroom_ratio', 'CRITICAL', 'cve-2026-109618', 'post_max_size >= memory_limit (ratio ' . sprintf('%.2f', $mem / $post) . ')', $math . ' A single maximum-size POST can by itself exceed the memory limit. ' . $expansion, $fix);
+            } elseif ($ratio < P2S_OOM_MIN_RATIO) {
+                $r->add('oom.headroom_ratio', 'HIGH', 'cve-2026-109618', 'OOM headroom ratio ' . sprintf('%.2f', $ratio) . ' < ' . sprintf('%.1f', P2S_OOM_MIN_RATIO), $math . ' ' . $expansion . ' The ratio is a containment heuristic, not a guarantee.', $fix);
+            } else {
+                $r->add('oom.headroom_ratio', 'PASS', 'cve-2026-109618', 'OOM headroom ratio ' . sprintf('%.2f', $ratio) . ' >= ' . sprintf('%.1f', P2S_OOM_MIN_RATIO), $math);
+            }
+        }
+        if ($upload !== null && $post > 0 && $upload > $post) {
+            $r->add('oom.upload_gt_post', 'WARNING', 'cve-2026-109618', 'upload_max_filesize (' . p2s_human_bytes($upload) . ') > post_max_size (' . p2s_human_bytes($post) . ')', 'post_max_size caps the whole request, so the larger upload_max_filesize is unreachable and signals that size limits were not reviewed together.', 'Set upload_max_filesize <= post_max_size.');
+        }
+    }
+
+    if ($vars === null || $vars > P2S_MAX_INPUT_VARS_MAX) {
+        $r->add('oom.max_input_vars', 'WARNING', 'cve-2026-109618', 'max_input_vars = ' . $values['max_input_vars'] . ' (recommended <= ' . P2S_MAX_INPUT_VARS_MAX . ')', 'Each input variable becomes a HashTable bucket; high limits let one request allocate large numbers of buckets before user code runs.', 'Set max_input_vars = 1000 (or lower) on pools that serve untrusted routes.');
+    } else {
+        $r->add('oom.max_input_vars', 'PASS', 'cve-2026-109618', 'max_input_vars = ' . $vars . ' (<= ' . P2S_MAX_INPUT_VARS_MAX . ')');
+    }
+    if ($nesting === null || $nesting > P2S_NESTING_MAX) {
+        $r->add('oom.max_input_nesting_level', 'WARNING', 'cve-2026-109618', 'max_input_nesting_level = ' . $values['max_input_nesting_level'] . ' (recommended <= ' . P2S_NESTING_MAX . ')', 'Deeply nested a[b][c]... keys allocate a nested HashTable per level, multiplying memory per byte of payload.', 'Set max_input_nesting_level = 32 on untrusted routes.');
+    } else {
+        $r->add('oom.max_input_nesting_level', 'PASS', 'cve-2026-109618', 'max_input_nesting_level = ' . $nesting . ' (<= ' . P2S_NESTING_MAX . ')');
+    }
+}
+
+function p2s_module_multipart(P2S_Report $r, array $values, array $v)
+{
+    $progress = p2s_ini_bool($values['session.upload_progress.enabled']);
+    $postReading = p2s_ini_bool($values['enable_post_data_reading']);
+    $vars = p2s_parse_int($values['max_input_vars']);
+    $uploads = p2s_parse_int($values['max_file_uploads']);
+    $r->metrics['session_upload_progress_enabled'] = $progress;
+    $r->metrics['enable_post_data_reading'] = $postReading;
+    $r->metrics['file_uploads'] = p2s_ini_bool($values['file_uploads']);
+
+    if ($progress) {
+        $r->add(
+            'multipart.upload_progress',
+            'HIGH',
+            'cve-2026-109619',
+            'session.upload_progress.enabled = On',
+            'The session upload-progress RFC1867 hook is the reported path through which request-owned multipart state survives into a later request on the same worker (CVE-2026-109619). Disabling it is necessary but NOT sufficient: the multipart parser itself runs before any PHP code, so only a patched runtime fully closes the bug.',
+            'Set session.upload_progress.enabled = 0 in php.ini and php_admin_flag[session.upload_progress.enabled] = off in every FPM pool.'
+        );
+    } else {
+        $r->add('multipart.upload_progress', 'PASS', 'cve-2026-109619', 'session.upload_progress.enabled = Off');
+    }
+
+    if (!$postReading) {
+        $r->add('multipart.post_data_reading', 'PASS', 'cve-2026-109619', 'enable_post_data_reading = Off (PHP does not parse request bodies)', 'Multipart parsing only happens when the application reads php://input itself.');
+    } else {
+        $r->add('multipart.post_data_reading', 'INFO', 'cve-2026-109619', 'enable_post_data_reading = On (default)', 'PHP parses multipart bodies into $_POST/$_FILES before your code runs. Keep it on unless the pool serves only JSON/API routes, where turning it off removes the multipart parser from the attack surface.');
+    }
+
+    $fallback = ($vars !== null ? $vars : 1000) + ($uploads !== null ? $uploads : 20);
+    $supported = p2s_supports_multipart_body_parts($v);
+    $raw = p2s_parse_int($values['max_multipart_body_parts']);
+    $effective = ($supported && $raw !== null && $raw >= 0) ? $raw : $fallback;
+    $r->metrics['max_multipart_body_parts_effective'] = $effective;
+
+    if (!$supported) {
+        $r->add('multipart.body_parts', 'WARNING', 'cve-2026-109619', 'max_multipart_body_parts unavailable on PHP ' . $v['full'], 'The directive exists from 8.0.28 / 8.1.16 / 8.2.3. Without it, multipart part count is bounded only by max_input_vars + max_file_uploads = ' . $effective . '.', 'Cap multipart part counts at the edge (./configs/nginx-multipart-guard.conf) and keep max_input_vars <= 1000.');
+    } elseif ($raw === null || $raw < 0) {
+        $r->add('multipart.body_parts', 'WARNING', 'cve-2026-109619', 'max_multipart_body_parts unset (effective ' . $effective . ')', 'With the default -1, PHP allows max_input_vars + max_file_uploads = ' . $effective . ' parts per request.', 'Set max_multipart_body_parts = ' . P2S_MULTIPART_PARTS_MAX . ' (or lower) on public pools.');
+    } elseif ($raw > P2S_MULTIPART_PARTS_MAX) {
+        $r->add('multipart.body_parts', 'WARNING', 'cve-2026-109619', 'max_multipart_body_parts = ' . $raw . ' (> ' . P2S_MULTIPART_PARTS_MAX . ')', 'Each part allocates parser state and HashTable entries before user code runs.', 'Set max_multipart_body_parts = ' . P2S_MULTIPART_PARTS_MAX . ' (or lower) on public pools.');
+    } else {
+        $r->add('multipart.body_parts', 'PASS', 'cve-2026-109619', 'max_multipart_body_parts = ' . $raw . ' (<= ' . P2S_MULTIPART_PARTS_MAX . ')');
+    }
+}
+
+function p2s_module_fpm(P2S_Report $r, array $pools)
+{
+    $summary = array();
+    $bad = array();
+    $unknown = array();
+    foreach ($pools as $pool) {
+        $raw = isset($pool['settings']['pm.max_requests']) ? $pool['settings']['pm.max_requests'] : null;
+        $parsed = p2s_parse_int($raw);
+        $summary[] = array(
+            'pool' => $pool['label'],
+            'pm' => isset($pool['settings']['pm']) ? $pool['settings']['pm'] : null,
+            'pm_max_requests' => $parsed,
+        );
+        if ($raw === null || $parsed === 0) {
+            $bad[] = $pool['label'] . ' = ' . ($raw === null ? 'unset (defaults to 0)' : '0');
+        } elseif ($parsed === null) {
+            $unknown[] = $pool['label'] . ' = ' . $raw;
+        } elseif ($parsed > P2S_FPM_MAX_REQUESTS_MAX || $parsed < 0) {
+            $bad[] = $pool['label'] . ' = ' . $parsed;
+        }
+    }
+    $r->fpmPools = $summary;
+
+    if (count($pools) === 0) {
+        $r->add(
+            'fpm.max_requests',
+            'WARNING',
+            'cve-2026-109619',
+            'FPM pool config not found - worker recycling unverified',
+            'Without pm.max_requests, FPM workers live forever and any request state corrupted by CVE-2026-109618/109619 persists into later requests.',
+            'Re-run with --fpm-conf=/etc/php/<version>/fpm/pool.d/www.conf.'
+        );
+        return;
+    }
+    if (count($bad) > 0) {
+        $r->add(
+            'fpm.max_requests',
+            'HIGH',
+            'cve-2026-109619',
+            'Infinite or long-lived FPM workers: ' . implode(', ', $bad),
+            'pm.max_requests = 0 (the default) or > ' . P2S_FPM_MAX_REQUESTS_MAX . ' keeps each worker process alive indefinitely. Heap or request state corrupted by an OOM bailout or a stale multipart reference is then reused by subsequent, unrelated requests on that worker.',
+            'Set pm.max_requests = 300 (250-500 range) in every pool and reload PHP-FPM. See ./configs/php-fpm-hardening.ini.'
+        );
+    }
+    if (count($unknown) > 0) {
+        $r->add('fpm.max_requests_unparsed', 'WARNING', 'cve-2026-109619', 'Non-numeric pm.max_requests: ' . implode(', ', $unknown), 'Values such as ${ENV} placeholders are resolved at FPM start and cannot be verified statically.', 'Confirm the resolved value is between 250 and 500.');
+    }
+    if (count($bad) === 0 && count($unknown) === 0) {
+        $r->add('fpm.max_requests', 'PASS', 'cve-2026-109619', 'All ' . count($pools) . ' FPM pool(s) recycle workers (pm.max_requests 1-' . P2S_FPM_MAX_REQUESTS_MAX . ')');
+    }
+}
+
+function p2s_module_composer(P2S_Report $r, $lockFile)
+{
+    if ($lockFile === null) {
+        $r->sources['composer_lock'] = 'none';
+        $r->add('composer.lock_missing', 'INFO', 'composer', 'No composer.lock found - upgrade-readiness scan skipped', 'Pass --path=<project root> (or a composer.lock path) to estimate PHP 8.3/8.4 migration effort.');
+        return;
+    }
+    $r->secret($lockFile);
+    $r->secret(dirname($lockFile));
+    $raw = @file_get_contents($lockFile);
+    $lock = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($lock)) {
+        $r->sources['composer_lock'] = 'invalid';
+        $r->add('composer.lock_invalid', 'WARNING', 'composer', 'composer.lock could not be parsed as JSON', 'The file is unreadable or not valid JSON.', 'Regenerate with composer update --lock.');
+        return;
+    }
+    $r->sources['composer_lock'] = 'found';
+    $a = p2s_analyze_composer_lock($lock);
+    $r->composer = $a;
+
+    if (count($a['php_blockers']) > 0) {
+        $names = array();
+        foreach ($a['php_blockers'] as $b) {
+            $names[] = $b['name'] . ' (' . $b['php_constraint'] . ')';
+        }
+        $r->add('composer.php_blockers', 'WARNING', 'composer', count($a['php_blockers']) . ' package(s) pin PHP below 8.3/8.4', implode(', ', $names) . '.', 'Upgrade or replace each package before moving the runtime; see the blocker table.');
+    } else {
+        $r->add('composer.php_blockers', 'PASS', 'composer', 'No locked package blocks PHP 8.3/8.4 via require.php');
+    }
+    if (count($a['abandoned']) > 0) {
+        $names = array();
+        foreach ($a['abandoned'] as $b) {
+            $names[] = $b['name'] . ($b['replacement'] !== null ? ' -> ' . $b['replacement'] : ' (no replacement)');
+        }
+        $r->add('composer.abandoned', 'WARNING', 'composer', count($a['abandoned']) . ' abandoned package(s) locked', implode(', ', $names) . '.', 'Abandoned packages receive no security or PHP-compatibility fixes; schedule replacements.');
+    }
+    if (count($a['extension_blockers']) > 0) {
+        $names = array();
+        foreach ($a['extension_blockers'] as $b) {
+            $names[] = $b['name'] . ' requires ' . $b['extension'] . ' (' . $b['status'] . ')';
+        }
+        $r->add('composer.extensions', 'WARNING', 'composer', count($a['extension_blockers']) . ' problematic C-extension requirement(s)', implode('; ', $names) . '.', 'Port off removed extensions before the runtime upgrade.');
+    }
+    $r->add('composer.complexity', 'INFO', 'composer', 'Migration complexity: ' . $a['complexity'], 'Estimated effort: ' . $a['effort_estimate'] . '. ' . $a['rationale'] . ' Packages scanned: ' . $a['packages_total'] . '.');
+}
+
+/* ------------------------------------------------------------------------
+ * Orchestration
+ * --------------------------------------------------------------------- */
+
+function p2s_resolve_lock_file($path)
+{
+    if (@is_file($path)) {
+        return $path;
+    }
+    if (@is_dir($path)) {
+        $candidate = rtrim($path, '/\\') . DIRECTORY_SEPARATOR . 'composer.lock';
+        return @is_file($candidate) ? $candidate : null;
+    }
+    throw new P2S_UsageError('--path does not exist: ' . $path);
+}
+
+function p2s_run_audit(array $opts)
+{
+    $r = new P2S_Report($opts['json']);
+
+    $versionRaw = $opts['php-version'] !== null ? $opts['php-version'] : PHP_VERSION;
+    $cls = p2s_classify_runtime($versionRaw);
+    if ($cls['version'] === null) {
+        throw new P2S_UsageError('Invalid --php-version: ' . $versionRaw);
+    }
+    $v = $cls['version'];
+
+    $path = $opts['path'] !== null ? $opts['path'] : (string) getcwd();
+    $r->secret($path);
+    $realPath = @realpath($path);
+    if ($realPath !== false) {
+        $r->secret($realPath);
+    }
+    foreach (array('ini', 'fpm-conf') as $k) {
+        if ($opts[$k] !== null) {
+            $r->secret($opts[$k]);
+            $r->secret(dirname($opts[$k]));
+            $real = @realpath($opts[$k]);
+            if ($real !== false) {
+                $r->secret($real);
+                $r->secret(dirname($real));
+            }
+        }
+    }
+    $lockFile = p2s_resolve_lock_file($path);
+
+    p2s_module_runtime($r, $cls, PHP_SAPI);
+    $values = p2s_collect_ini($r, $opts, $v);
+    $pools = p2s_collect_fpm($r, $opts, $v);
+    p2s_apply_pool_overrides($r, $values, $pools);
+    $r->metrics['directive_sources'] = $r->directiveSources;
+    p2s_module_oom($r, $values);
+    p2s_module_multipart($r, $values, $v);
+    p2s_module_fpm($r, $pools);
+    p2s_module_composer($r, $lockFile);
+
+    return $r;
+}
+
+/* ------------------------------------------------------------------------
+ * JSON output (anonymized)
+ * --------------------------------------------------------------------- */
+
+function p2s_collect_scrub_secrets(P2S_Report $r)
+{
+    $secrets = $r->secrets;
+    $host = @gethostname();
+    if (is_string($host)) {
+        $secrets[$host] = true;
+        $short = explode('.', $host);
+        $secrets[$short[0]] = true;
+    }
+    $uname = @php_uname('n');
+    if (is_string($uname)) {
+        $secrets[$uname] = true;
+    }
+    foreach (array('HOME', 'USER', 'LOGNAME', 'HOSTNAME', 'PWD') as $env) {
+        $val = getenv($env);
+        if (is_string($val)) {
+            $secrets[$val] = true;
+        }
+    }
+    $cwd = getcwd();
+    if (is_string($cwd)) {
+        $secrets[$cwd] = true;
+    }
+    // Argless getenv() exists from PHP 7.1; on 7.0 fall back to the superglobals.
+    $env = PHP_VERSION_ID >= 70100 ? getenv() : array_merge($_SERVER, $_ENV);
+    if (is_array($env)) {
+        foreach ($env as $val) {
+            if (is_string($val) && strlen($val) >= 12) {
+                $secrets[$val] = true;
+            }
+        }
+    }
+    $list = array();
+    foreach ($secrets as $s => $unused) {
+        $s = (string) $s;
+        if (strlen($s) >= 4 && $s !== '/' && $s !== '.') {
+            $list[] = $s;
+        }
+    }
+    usort($list, function ($a, $b) {
+        return strlen($b) - strlen($a);
+    });
+    return $list;
+}
+
+function p2s_scrub_value($value, array $secrets)
+{
+    if (is_array($value)) {
+        $out = array();
+        foreach ($value as $k => $item) {
+            $out[$k] = p2s_scrub_value($item, $secrets);
+        }
+        return $out;
+    }
+    if (!is_string($value)) {
+        return $value;
+    }
+    foreach ($secrets as $s) {
+        $value = preg_replace('/(?<![A-Za-z0-9_])' . preg_quote($s, '/') . '(?![A-Za-z0-9_])/', '<redacted>', $value);
+    }
+    return preg_replace('#(?<![A-Za-z0-9_.])/(?:Users|home|root|var/www|srv|opt|private|tmp)/[^\s"\',;)]*#', '<redacted-path>', $value);
+}
+
+function p2s_build_payload(P2S_Report $r)
+{
+    $findings = array();
+    foreach ($r->sortedFindings() as $f) {
+        $findings[] = $f;
+    }
+    $counts = array();
+    foreach ($r->counts() as $sev => $n) {
+        $counts[strtolower($sev)] = $n;
+    }
+    $metrics = $r->metrics;
+    $metrics['fpm_pools'] = $r->fpmPools;
+
+    $composer = null;
+    if ($r->composer !== null) {
+        $composer = array(
+            'packages_total' => $r->composer['packages_total'],
+            'blocker_count' => $r->composer['blocker_count'],
+            'complexity' => $r->composer['complexity'],
+            'effort_estimate' => $r->composer['effort_estimate'],
+            'rationale' => $r->composer['rationale'],
+            'php_blockers' => $r->composer['php_blockers'],
+            'abandoned' => $r->composer['abandoned'],
+            'extension_blockers' => $r->composer['extension_blockers'],
+        );
+    }
+
+    $payload = array(
+        'schema_version' => P2S_SCHEMA_VERSION,
+        'tool' => array('name' => 'php2shell-audit', 'version' => P2S_VERSION, 'url' => P2S_REPO_URL),
+        'cves' => array('CVE-2026-109618', 'CVE-2026-109619'),
+        'anonymized' => true,
+        'runtime' => $r->runtime,
+        'sources' => $r->sources,
+        'metrics' => $metrics,
+        'findings' => $findings,
+        'composer' => $composer,
+        'summary' => array(
+            'overall_risk' => $r->overallRisk(),
+            'counts' => $counts,
+            'ci_exit_code' => $r->ciExitCode(),
+        ),
+    );
+    return p2s_scrub_value($payload, p2s_collect_scrub_secrets($r));
+}
+
+function p2s_render_json(P2S_Report $r)
+{
+    $flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES;
+    if (defined('JSON_PRESERVE_ZERO_FRACTION')) {
+        $flags |= JSON_PRESERVE_ZERO_FRACTION;
+    }
+    $json = json_encode(p2s_build_payload($r), $flags);
+    if ($json === false) {
+        $json = json_encode(array('error' => 'json_encode failed: ' . json_last_error_msg()));
+    }
+    return $json;
+}
+
+/* ------------------------------------------------------------------------
+ * Terminal output
+ * --------------------------------------------------------------------- */
+
+const P2S_WIDTH = 78;
+
+function p2s_color($text, $code, $enabled)
+{
+    return $enabled ? "\033[" . $code . 'm' . $text . "\033[0m" : $text;
+}
+
+function p2s_sev_color($severity)
+{
+    $map = array('CRITICAL' => '1;37;41', 'HIGH' => '1;31', 'WARNING' => '1;33', 'INFO' => '1;36', 'PASS' => '1;32');
+    return $map[$severity];
+}
+
+function p2s_width($s)
+{
+    $plain = preg_replace('/\033\[[0-9;]*m/', '', $s);
+    $n = @preg_match_all('/./us', $plain, $unused);
+    return is_int($n) && $n > 0 ? $n : strlen($plain);
+}
+
+function p2s_pad($s, $width)
+{
+    return $s . str_repeat(' ', max(0, $width - p2s_width($s)));
+}
+
+function p2s_truncate($s, $width)
+{
+    if (strlen($s) <= $width) {
+        return $s;
+    }
+    return substr($s, 0, max(1, $width - 3)) . '...';
+}
+
+function p2s_wrap($text, $width, $indent)
+{
+    $lines = array();
+    foreach (explode("\n", wordwrap($text, $width - strlen($indent), "\n", true)) as $line) {
+        $lines[] = $indent . $line;
+    }
+    return implode(PHP_EOL, $lines);
+}
+
+function p2s_box(array $rows, $color, $borderCode)
+{
+    $inner = P2S_WIDTH - 2;
+    $h = str_repeat('─', $inner);
+    $out = array(p2s_color('╭' . $h . '╮', $borderCode, $color));
+    foreach ($rows as $row) {
+        if ($row === '--') {
+            $out[] = p2s_color('├' . $h . '┤', $borderCode, $color);
+            continue;
+        }
+        $out[] = p2s_color('│', $borderCode, $color) . ' ' . p2s_pad($row, $inner - 2) . ' ' . p2s_color('│', $borderCode, $color);
+    }
+    $out[] = p2s_color('╰' . $h . '╯', $borderCode, $color);
+    return implode(PHP_EOL, $out);
+}
+
+function p2s_render_text(P2S_Report $r, $color)
+{
+    $out = array();
+    $risk = $r->overallRisk();
+    $counts = $r->counts();
+    $rt = $r->runtime;
+
+    $statusText = array(
+        'eol' => 'EOL - no upstream patch',
+        'unpatched' => 'unpatched (needs >= ' . $rt['patched_baseline'] . ')',
+        'patched' => 'patched (>= ' . $rt['patched_baseline'] . ')',
+        'newer' => 'newer than known baselines',
+    );
+    $countParts = array();
+    foreach (P2S_SEVERITY_ORDER as $sev) {
+        $countParts[] = p2s_color($counts[$sev] . ' ' . strtolower($sev), p2s_sev_color($sev), $color && $counts[$sev] > 0);
+    }
+    $ratio = isset($r->metrics['oom_headroom_ratio']) ? $r->metrics['oom_headroom_ratio'] : null;
+    $ratioText = $ratio === null ? 'n/a (unlimited or unparseable)' : sprintf('%.2fx', $ratio);
+    $ratioText .= sprintf(' (memory_limit %s / post_max_size %s)', p2s_human_bytes($r->metrics['memory_limit_bytes']), p2s_human_bytes($r->metrics['post_max_size_bytes']));
+
+    $rows = array(
+        p2s_color('php2shell-audit ' . P2S_VERSION, '1', $color) . ' · CVE-2026-109618 / CVE-2026-109619',
+        'Read-only exposure & PHP 8.3/8.4 upgrade-readiness audit',
+        '--',
+        'Overall risk   ' . p2s_color(' ' . $risk . ' ', p2s_sev_color($risk), $color),
+        'PHP runtime    ' . $rt['php_version'] . ' (' . $rt['sapi'] . ') · ' . $statusText[$rt['status']],
+        'Sources        ini=' . $r->sources['ini'] . ' · fpm=' . $r->sources['fpm_conf'] . ' · composer.lock=' . $r->sources['composer_lock'],
+        'Findings       ' . implode(' · ', $countParts),
+        'OOM headroom   ' . $ratioText,
+    );
+    if ($r->composer !== null) {
+        $rows[] = 'Migration      ' . $r->composer['complexity'] . ' · ' . $r->composer['blocker_count'] . ' blocker item(s)';
+    }
+    $out[] = p2s_box($rows, $color, '36');
+    $out[] = '';
+
+    $grouped = array();
+    foreach ($r->sortedFindings() as $f) {
+        $grouped[$f['severity']][] = $f;
+    }
+    $icons = array('CRITICAL' => '✖', 'HIGH' => '✖', 'WARNING' => '▲', 'INFO' => '●', 'PASS' => '✔');
+    foreach (P2S_SEVERITY_ORDER as $sev) {
+        if (!isset($grouped[$sev])) {
+            continue;
+        }
+        $label = ' ' . $sev . ' (' . count($grouped[$sev]) . ') ';
+        $out[] = p2s_color('──' . $label . str_repeat('─', max(0, P2S_WIDTH - 2 - strlen($label))), p2s_sev_color($sev), $color);
+        foreach ($grouped[$sev] as $f) {
+            $tag = p2s_color('[' . $sev . ']', p2s_sev_color($sev), $color);
+            $titleLines = explode("\n", wordwrap($f['title'], P2S_WIDTH - strlen($sev) - 6, "\n", true));
+            $out[] = ' ' . $icons[$sev] . ' ' . $tag . ' ' . array_shift($titleLines);
+            foreach ($titleLines as $cont) {
+                $out[] = '      ' . $cont;
+            }
+            if ($sev === 'PASS') {
+                continue;
+            }
+            $out[] = p2s_color('      ' . $f['id'], '2', $color);
+            if ($f['detail'] !== '') {
+                $out[] = p2s_wrap($f['detail'], P2S_WIDTH, '      ');
+            }
+            if ($f['remediation'] !== '') {
+                $out[] = p2s_color(p2s_wrap('Fix: ' . $f['remediation'], P2S_WIDTH, '      '), '32', $color);
+            }
+        }
+        $out[] = '';
+    }
+
+    if ($r->composer !== null && ($r->composer['blocker_count'] > 0)) {
+        $out[] = p2s_color('── COMPOSER BLOCKERS ' . str_repeat('─', P2S_WIDTH - 21), '1;35', $color);
+        if (count($r->composer['php_blockers']) > 0) {
+            $out[] = sprintf(' %-30s %-12s %-20s %-5s %-5s', 'Package', 'Locked', 'require.php', '8.3', '8.4');
+            $out[] = ' ' . str_repeat('-', 30) . ' ' . str_repeat('-', 12) . ' ' . str_repeat('-', 20) . ' ' . str_repeat('-', 5) . ' ' . str_repeat('-', 5);
+            foreach ($r->composer['php_blockers'] as $b) {
+                $line = sprintf(
+                    ' %-30s %-12s %-20s %-5s %-5s',
+                    p2s_truncate($b['name'] . ($b['dev'] ? ' (dev)' : ''), 30),
+                    p2s_truncate($b['version'], 12),
+                    p2s_truncate($b['php_constraint'], 20),
+                    $b['blocks_php83'] ? 'NO' : 'ok',
+                    $b['blocks_php84'] ? 'NO' : 'ok'
+                );
+                $out[] = $line;
+            }
+            $out[] = '';
+        }
+        foreach ($r->composer['abandoned'] as $b) {
+            $out[] = ' abandoned  ' . $b['name'] . ' ' . $b['version'] . ($b['replacement'] !== null ? '  ->  ' . $b['replacement'] : '  (no replacement named)');
+        }
+        foreach ($r->composer['extension_blockers'] as $b) {
+            $out[] = ' extension  ' . $b['name'] . ' requires ' . $b['extension'] . ' [' . $b['status'] . ']';
+            $out[] = p2s_wrap($b['note'], P2S_WIDTH, '            ');
+        }
+        $out[] = '';
+        $out[] = ' Complexity: ' . p2s_color($r->composer['complexity'], '1', $color) . ' · Estimated effort: ' . $r->composer['effort_estimate'];
+        $out[] = '';
+    }
+
+    $next = array(
+        p2s_color('Next steps', '1', $color),
+        '--',
+        '1. Patch: PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 or later, then reload FPM.',
+        '2. Contain at the edge: configs/nginx-multipart-guard.conf,',
+        '   configs/cloudflare-waf-rules.json',
+        '3. Harden FPM: configs/php-fpm-hardening.ini',
+        '   (pm.max_requests = 300, upload_progress off, ratio >= 4)',
+        '4. Can\'t upgrade overnight? docs/STRANGLER_FIG_RFC_TEMPLATE.md',
+        '5. Share safely: php2shell-audit --json > audit-summary.json',
+        '   (anonymized: no hostnames, paths or environment values)',
+        '--',
+        'Containment sprint: @jcyrus28 · docs/SPRINT_OVERVIEW.md',
+        P2S_REPO_URL,
+    );
+    $out[] = p2s_box($next, $color, '32');
+    return implode(PHP_EOL, array_map('rtrim', $out)) . PHP_EOL;
+}
+
+/* ------------------------------------------------------------------------
+ * CLI
+ * --------------------------------------------------------------------- */
+
+function p2s_usage()
+{
+    return <<<'TXT'
+php2shell-audit — read-only php2shell (CVE-2026-109618 / CVE-2026-109619) exposure audit
+
+Usage:
+  php bin/php2shell-audit [options]
+
+Options:
+  --path=<dir|file>     Project root containing composer.lock, or a composer.lock path
+                        (default: current directory)
+  --ini=<file>          Audit this php.ini instead of the running SAPI's ini_get() values
+  --fpm-conf=<file>     php-fpm.conf or pool file (www.conf); include= directives are followed
+  --php-version=<ver>   Override the PHP version under audit (default: PHP_VERSION)
+  --json                Deterministic, anonymized JSON report (safe to share externally)
+  --ci                  Exit 1 when any CRITICAL/HIGH finding exists, else 0
+  --no-color            Disable ANSI colours (also honours NO_COLOR)
+  --no-discover         Do not auto-discover FPM php.ini / pool files
+  --version             Print version
+  -h, --help            Show this help
+
+Exit codes: 0 ok · 1 CRITICAL/HIGH with --ci · 2 usage or unreadable input
+
+This tool never makes network calls, writes files or executes payloads.
+
+TXT;
+}
+
+function p2s_parse_args(array $argv)
+{
+    $opts = array(
+        'path' => null, 'ini' => null, 'fpm-conf' => null, 'php-version' => null,
+        'json' => false, 'ci' => false, 'no-color' => false, 'no-discover' => false,
+        'help' => false, 'version' => false,
+    );
+    $valued = array('path', 'ini', 'fpm-conf', 'php-version');
+    $n = count($argv);
+    for ($i = 1; $i < $n; $i++) {
+        $arg = (string) $argv[$i];
+        if ($arg === '-h') {
+            $opts['help'] = true;
+            continue;
+        }
+        if ($arg === '--') {
+            continue;
+        }
+        if (substr($arg, 0, 2) !== '--') {
+            throw new P2S_UsageError('Unexpected argument: ' . $arg);
+        }
+        $name = substr($arg, 2);
+        $value = null;
+        $eq = strpos($name, '=');
+        if ($eq !== false) {
+            $value = substr($name, $eq + 1);
+            $name = substr($name, 0, $eq);
+        }
+        if (in_array($name, $valued, true)) {
+            if ($value === null) {
+                if ($i + 1 >= $n) {
+                    throw new P2S_UsageError('--' . $name . ' requires a value');
+                }
+                $value = (string) $argv[++$i];
+            }
+            if ($value === '') {
+                throw new P2S_UsageError('--' . $name . ' requires a non-empty value');
+            }
+            $opts[$name] = $value;
+        } elseif (array_key_exists($name, $opts)) {
+            if ($value !== null) {
+                throw new P2S_UsageError('--' . $name . ' does not take a value');
+            }
+            $opts[$name] = true;
+        } else {
+            throw new P2S_UsageError('Unknown option: --' . $name);
+        }
+    }
+    return $opts;
+}
+
+function p2s_stdout_is_tty()
+{
+    if (function_exists('stream_isatty')) {
+        return @stream_isatty(STDOUT);
+    }
+    if (function_exists('posix_isatty')) {
+        return @posix_isatty(STDOUT);
+    }
+    return false;
+}
+
+function p2s_main(array $argv)
+{
+    if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
+        // Never serve audit output over HTTP if this file lands in a docroot.
+        if (!headers_sent()) {
+            header('HTTP/1.1 404 Not Found');
+        }
+        return 2;
+    }
+    if (!function_exists('json_decode')) {
+        fwrite(STDERR, 'php2shell-audit: the json extension is required.' . PHP_EOL);
+        return 2;
+    }
+    try {
+        $opts = p2s_parse_args($argv);
+        if ($opts['help']) {
+            fwrite(STDOUT, p2s_usage());
+            return 0;
+        }
+        if ($opts['version']) {
+            fwrite(STDOUT, 'php2shell-audit ' . P2S_VERSION . PHP_EOL);
+            return 0;
+        }
+        $report = p2s_run_audit($opts);
+    } catch (P2S_UsageError $e) {
+        fwrite(STDERR, 'php2shell-audit: ' . $e->getMessage() . PHP_EOL . 'Run with --help for usage.' . PHP_EOL);
+        return 2;
+    }
+
+    if ($opts['json']) {
+        fwrite(STDOUT, p2s_render_json($report) . PHP_EOL);
+    } else {
+        $color = !$opts['no-color'] && getenv('NO_COLOR') === false && p2s_stdout_is_tty();
+        fwrite(STDOUT, p2s_render_text($report, $color));
+    }
+    return $opts['ci'] ? $report->ciExitCode() : 0;
+}
+
+if (!defined('P2S_LIBRARY_MODE')) {
+    exit(p2s_main(isset($_SERVER['argv']) ? $_SERVER['argv'] : array()));
+}

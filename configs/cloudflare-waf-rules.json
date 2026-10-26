@@ -1,0 +1,99 @@
+{
+  "_meta": {
+    "name": "php2shell containment rules (CVE-2026-109618 / CVE-2026-109619)",
+    "source": "https://github.com/jcyrus28/php2shell-audit",
+    "license": "BSD-3-Clause",
+    "notes": [
+      "Containment only. Patch to PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12+ or a vendor backport.",
+      "Rule 1 (multipart outside /api/v1/upload) is the highest-value rule: PHP only runs its RFC1867 multipart parser for multipart bodies.",
+      "Rule 2's cookie test is a cheap pre-filter, not authentication. Real session validation stays at the origin (nginx auth_request in nginx-multipart-guard.conf).",
+      "http.request.body.size (rule 5) depends on plan body-inspection support. If your zone rejects the expression, deploy the ruleset without that rule; nginx client_max_body_size 1m enforces the same limit at the origin.",
+      "Rate limiting rules: characteristics must include cf.colo.id; available period and mitigation_timeout values depend on plan (Free: 10s period/timeout).",
+      "Change /api/v1/upload and PHPSESSID to match your application before deploying."
+    ],
+    "deploy": [
+      "WARNING: PUT on a phase entrypoint REPLACES every existing rule in that phase. Export current rules first:",
+      "curl -s https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint -H \"Authorization: Bearer $CF_API_TOKEN\" > custom-rules-backup.json",
+      "jq '{rules: .rulesets[0].rules}' cloudflare-waf-rules.json | curl -s -X PUT https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint -H \"Authorization: Bearer $CF_API_TOKEN\" -H 'Content-Type: application/json' --data @-",
+      "jq '{rules: .rulesets[1].rules}' cloudflare-waf-rules.json | curl -s -X PUT https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_ratelimit/entrypoint -H \"Authorization: Bearer $CF_API_TOKEN\" -H 'Content-Type: application/json' --data @-",
+      "Dashboard alternative: Security > WAF > Custom rules > Create rule > Edit expression, paste each expression below."
+    ]
+  },
+  "rulesets": [
+    {
+      "name": "php2shell custom rules",
+      "kind": "zone",
+      "phase": "http_request_firewall_custom",
+      "rules": [
+        {
+          "ref": "p2s_block_multipart_non_upload",
+          "description": "php2shell: block multipart/form-data on every route except /api/v1/upload",
+          "expression": "(any(lower(http.request.headers[\"content-type\"][*])[*] contains \"multipart/\") and http.request.uri.path ne \"/api/v1/upload\")",
+          "action": "block",
+          "enabled": true
+        },
+        {
+          "ref": "p2s_block_unauth_upload",
+          "description": "php2shell: block multipart uploads that carry no session cookie",
+          "expression": "(http.request.uri.path eq \"/api/v1/upload\" and not http.cookie contains \"PHPSESSID=\")",
+          "action": "block",
+          "enabled": true
+        },
+        {
+          "ref": "p2s_upload_post_only",
+          "description": "php2shell: /api/v1/upload accepts POST only",
+          "expression": "(http.request.uri.path eq \"/api/v1/upload\" and http.request.method ne \"POST\")",
+          "action": "block",
+          "enabled": true
+        },
+        {
+          "ref": "p2s_block_oversized_query",
+          "description": "php2shell: block oversized query strings (array-key / nesting bombs build HashTables before user code runs)",
+          "expression": "(len(http.request.uri.query) gt 2048)",
+          "action": "block",
+          "enabled": true
+        },
+        {
+          "ref": "p2s_block_oversized_body",
+          "description": "php2shell: block request bodies over 1 MiB outside the upload endpoint",
+          "expression": "(http.request.body.size gt 1048576 and http.request.uri.path ne \"/api/v1/upload\")",
+          "action": "block",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "name": "php2shell rate limits",
+      "kind": "zone",
+      "phase": "http_ratelimit",
+      "rules": [
+        {
+          "ref": "p2s_ratelimit_upload",
+          "description": "php2shell: throttle the upload endpoint per client IP",
+          "expression": "(http.request.uri.path eq \"/api/v1/upload\")",
+          "action": "block",
+          "ratelimit": {
+            "characteristics": ["cf.colo.id", "ip.src"],
+            "period": 60,
+            "requests_per_period": 20,
+            "mitigation_timeout": 600
+          },
+          "enabled": true
+        },
+        {
+          "ref": "p2s_ratelimit_post",
+          "description": "php2shell: throttle POST bursts on public routes (OOM probing is high-volume)",
+          "expression": "(http.request.method eq \"POST\" and http.request.uri.path ne \"/api/v1/upload\")",
+          "action": "block",
+          "ratelimit": {
+            "characteristics": ["cf.colo.id", "ip.src"],
+            "period": 60,
+            "requests_per_period": 120,
+            "mitigation_timeout": 600
+          },
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}

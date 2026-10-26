@@ -1,0 +1,529 @@
+{
+    "_readme": [
+        "This file locks the dependencies of your project to a known state",
+        "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+        "This file is @generated automatically"
+    ],
+    "content-hash": "fe6be083d9e6170f93e4a70eef323d13",
+    "packages": [
+        {
+            "name": "acme/billing-core",
+            "version": "4.2.0",
+            "source": {
+                "type": "git",
+                "url": "https://gitlab.acme.example/php/billing-core.git",
+                "reference": "f05cfa18bea8eaac017d72f1162a36f8910d5911"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://gitlab.acme.example/php/billing-core/-/archive/f05cfa18bea8eaac017d72f1162a36f8910d5911.zip",
+                "reference": "f05cfa18bea8eaac017d72f1162a36f8910d5911",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=7.4 <8.4",
+                "ext-bcmath": "*",
+                "moneyphp/money": "^3.3"
+            },
+            "type": "library",
+            "license": [
+                "proprietary"
+            ],
+            "description": "Acme internal invoicing and proration engine",
+            "time": "2024-03-11T09:30:00+00:00"
+        },
+        {
+            "name": "acme/legacy-auth",
+            "version": "3.4.0",
+            "source": {
+                "type": "git",
+                "url": "https://gitlab.acme.example/php/legacy-auth.git",
+                "reference": "1845262b0d22bdc2447357d8c16663ecbef6729c"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://gitlab.acme.example/php/legacy-auth/-/archive/1845262b0d22bdc2447357d8c16663ecbef6729c.zip",
+                "reference": "1845262b0d22bdc2447357d8c16663ecbef6729c",
+                "shasum": ""
+            },
+            "require": {
+                "php": "~7.4",
+                "firebase/php-jwt": "^5.0"
+            },
+            "type": "library",
+            "license": [
+                "proprietary"
+            ],
+            "description": "Acme internal session and SSO bridge for the legacy monolith",
+            "time": "2021-06-21T14:02:00+00:00"
+        },
+        {
+            "name": "acme/payment-gateway-sdk",
+            "version": "2.3.1",
+            "source": {
+                "type": "git",
+                "url": "https://gitlab.acme.example/php/payment-gateway-sdk.git",
+                "reference": "e34a3784e1483cd8348a90f43c02c9faecad1108"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://gitlab.acme.example/php/payment-gateway-sdk/-/archive/e34a3784e1483cd8348a90f43c02c9faecad1108.zip",
+                "reference": "e34a3784e1483cd8348a90f43c02c9faecad1108",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=5.6 <8.0",
+                "ext-mcrypt": "*",
+                "ext-curl": "*"
+            },
+            "type": "library",
+            "license": [
+                "proprietary"
+            ],
+            "description": "Acme internal card-gateway client (3DES payload encryption via mcrypt)",
+            "time": "2017-08-14T11:45:00+00:00"
+        },
+        {
+            "name": "acme/report-engine",
+            "version": "5.2.0",
+            "source": {
+                "type": "git",
+                "url": "https://gitlab.acme.example/php/report-engine.git",
+                "reference": "3c08d02c80a242ebc7b26b653a2f1c6dffeb1c7e"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://gitlab.acme.example/php/report-engine/-/archive/3c08d02c80a242ebc7b26b653a2f1c6dffeb1c7e.zip",
+                "reference": "3c08d02c80a242ebc7b26b653a2f1c6dffeb1c7e",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=7.2,<8.2",
+                "phpoffice/phpexcel": "^1.8"
+            },
+            "type": "library",
+            "license": [
+                "proprietary"
+            ],
+            "description": "Acme internal scheduled reporting and XLSX export",
+            "time": "2022-09-30T16:20:00+00:00"
+        },
+        {
+            "name": "components/jquery",
+            "version": "v3.6.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/components/jquery.git",
+                "reference": "c0c4f6ea2f3e0a399235efabc623cb0a79998993"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/components/jquery/zipball/c0c4f6ea2f3e0a399235efabc623cb0a79998993",
+                "reference": "c0c4f6ea2f3e0a399235efabc623cb0a79998993",
+                "shasum": ""
+            },
+            "type": "component",
+            "license": [
+                "MIT"
+            ],
+            "description": "jQuery JavaScript Library",
+            "time": "2021-03-02T18:21:15+00:00"
+        },
+        {
+            "name": "doctrine/annotations",
+            "version": "1.13.3",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/doctrine/annotations.git",
+                "reference": "60e46e0f80c4657474eda638ba0551e07f29e20e"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/doctrine/annotations/zipball/60e46e0f80c4657474eda638ba0551e07f29e20e",
+                "reference": "60e46e0f80c4657474eda638ba0551e07f29e20e",
+                "shasum": ""
+            },
+            "require": {
+                "doctrine/lexer": "1.*",
+                "ext-tokenizer": "*",
+                "php": "^7.1 || ^8.0",
+                "psr/cache": "^1 || ^2 || ^3"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Docblock Annotations Parser",
+            "time": "2022-07-02T10:48:51+00:00"
+        },
+        {
+            "name": "guzzlehttp/guzzle",
+            "version": "6.5.5",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/guzzlehttp/guzzle.git",
+                "reference": "6382f15e02ed4a053e094c966e0f23c4f5b6357e"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/guzzlehttp/guzzle/zipball/6382f15e02ed4a053e094c966e0f23c4f5b6357e",
+                "reference": "6382f15e02ed4a053e094c966e0f23c4f5b6357e",
+                "shasum": ""
+            },
+            "require": {
+                "ext-json": "*",
+                "guzzlehttp/promises": "^1.0",
+                "guzzlehttp/psr7": "^1.6.1",
+                "php": ">=5.5",
+                "symfony/polyfill-intl-idn": "^1.17.0"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Guzzle is a PHP HTTP client library",
+            "time": "2020-06-16T21:01:06+00:00"
+        },
+        {
+            "name": "league/flysystem",
+            "version": "1.1.10",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/league/flysystem.git",
+                "reference": "41b8b7df620de13a0aeaf285cdebf126ab5bc10d"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/league/flysystem/zipball/41b8b7df620de13a0aeaf285cdebf126ab5bc10d",
+                "reference": "41b8b7df620de13a0aeaf285cdebf126ab5bc10d",
+                "shasum": ""
+            },
+            "require": {
+                "ext-fileinfo": "*",
+                "league/mime-type-detection": "^1.3",
+                "php": "^7.2.5 || ^8.0"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Filesystem abstraction: Many filesystems, one API.",
+            "time": "2022-10-04T09:16:37+00:00"
+        },
+        {
+            "name": "monolog/monolog",
+            "version": "1.27.1",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/monolog/monolog.git",
+                "reference": "7a2f711efe1ea1b5a0706dc416e9ee66467af0ad"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/monolog/monolog/zipball/7a2f711efe1ea1b5a0706dc416e9ee66467af0ad",
+                "reference": "7a2f711efe1ea1b5a0706dc416e9ee66467af0ad",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=5.3.0",
+                "psr/log": "~1.0"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Sends your logs to files, sockets, inboxes, databases and various web services",
+            "time": "2022-06-09T08:53:42+00:00"
+        },
+        {
+            "name": "php-imap/php-imap",
+            "version": "3.1.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/php-imap/php-imap.git",
+                "reference": "e93fadd6fcd92e11143027d9a90f082964093ada"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/php-imap/php-imap/zipball/e93fadd6fcd92e11143027d9a90f082964093ada",
+                "reference": "e93fadd6fcd92e11143027d9a90f082964093ada",
+                "shasum": ""
+            },
+            "require": {
+                "ext-imap": "*",
+                "php": ">=5.4"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Manage mailboxes, filter/get/delete emails in PHP (supports IMAP/POP3/NNTP)",
+            "time": "2018-02-09T09:12:44+00:00"
+        },
+        {
+            "name": "phpoffice/phpexcel",
+            "version": "1.8.2",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/phpoffice/phpexcel.git",
+                "reference": "cf5bf3d2e6674747f476806512397704825c6f5e"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/phpoffice/phpexcel/zipball/cf5bf3d2e6674747f476806512397704825c6f5e",
+                "reference": "cf5bf3d2e6674747f476806512397704825c6f5e",
+                "shasum": ""
+            },
+            "require": {
+                "ext-mbstring": "*",
+                "ext-xml": "*",
+                "ext-xmlwriter": "*",
+                "php": "^5.2|^7.0"
+            },
+            "type": "library",
+            "license": [
+                "LGPL-2.1-only"
+            ],
+            "description": "PHPExcel - OpenXML - Read, Create and Write Spreadsheet documents in PHP - Spreadsheet engine",
+            "time": "2018-11-22T23:07:24+00:00",
+            "abandoned": "phpoffice/phpspreadsheet"
+        },
+        {
+            "name": "slim/slim",
+            "version": "3.12.3",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/slim/slim.git",
+                "reference": "473e960b00cf60036285f1ea5f054136370c8f53"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/slim/slim/zipball/473e960b00cf60036285f1ea5f054136370c8f53",
+                "reference": "473e960b00cf60036285f1ea5f054136370c8f53",
+                "shasum": ""
+            },
+            "require": {
+                "ext-json": "*",
+                "nikic/fast-route": "^1.0",
+                "php": ">=5.5.0",
+                "pimple/pimple": "^3.0",
+                "psr/container": "^1.0",
+                "psr/http-message": "^1.0"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Slim is a PHP micro framework that helps you quickly write simple yet powerful web applications and APIs",
+            "time": "2019-11-28T17:40:33+00:00"
+        },
+        {
+            "name": "swiftmailer/swiftmailer",
+            "version": "v6.3.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/swiftmailer/swiftmailer.git",
+                "reference": "16f5f4b6ca786a02a411290521d14018d55d92e2"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/swiftmailer/swiftmailer/zipball/16f5f4b6ca786a02a411290521d14018d55d92e2",
+                "reference": "16f5f4b6ca786a02a411290521d14018d55d92e2",
+                "shasum": ""
+            },
+            "require": {
+                "egulias/email-validator": "^2.0|^3.1",
+                "php": ">=7.0.0",
+                "symfony/polyfill-iconv": "^1.0",
+                "symfony/polyfill-intl-idn": "^1.10",
+                "symfony/polyfill-mbstring": "^1.0"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Swiftmailer, free feature-rich PHP mailer",
+            "time": "2021-10-18T15:26:12+00:00",
+            "abandoned": "symfony/mailer"
+        },
+        {
+            "name": "symfony/console",
+            "version": "v4.4.49",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/symfony/console.git",
+                "reference": "43f08e41a8b104d68b2a1012b6e5d9e84f52bb51"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/symfony/console/zipball/43f08e41a8b104d68b2a1012b6e5d9e84f52bb51",
+                "reference": "43f08e41a8b104d68b2a1012b6e5d9e84f52bb51",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=7.1.3",
+                "symfony/polyfill-mbstring": "~1.0",
+                "symfony/polyfill-php73": "^1.8",
+                "symfony/polyfill-php80": "^1.16",
+                "symfony/service-contracts": "^1.1|^2"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Eases the creation of beautiful and testable command line interfaces",
+            "time": "2022-11-05T17:10:16+00:00"
+        },
+        {
+            "name": "symfony/http-foundation",
+            "version": "v4.4.49",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/symfony/http-foundation.git",
+                "reference": "f1fd040f6ce2a7078f8ad30da7fb95b45eba8187"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/symfony/http-foundation/zipball/f1fd040f6ce2a7078f8ad30da7fb95b45eba8187",
+                "reference": "f1fd040f6ce2a7078f8ad30da7fb95b45eba8187",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=7.1.3",
+                "symfony/mime": "^4.3|^5.0",
+                "symfony/polyfill-mbstring": "~1.1",
+                "symfony/polyfill-php80": "^1.16"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Defines an object-oriented layer for the HTTP specification",
+            "time": "2022-11-04T16:17:57+00:00"
+        },
+        {
+            "name": "symfony/polyfill-mbstring",
+            "version": "v1.28.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/symfony/polyfill-mbstring.git",
+                "reference": "ef38c2beabde2cbfb68c62b6d1ea2d46fc1581cc"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/symfony/polyfill-mbstring/zipball/ef38c2beabde2cbfb68c62b6d1ea2d46fc1581cc",
+                "reference": "ef38c2beabde2cbfb68c62b6d1ea2d46fc1581cc",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=7.1"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Symfony polyfill for the Mbstring extension",
+            "time": "2023-07-28T09:04:16+00:00"
+        },
+        {
+            "name": "zendframework/zend-diactoros",
+            "version": "2.2.1",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/zendframework/zend-diactoros.git",
+                "reference": "c6c87c2772de8f4b1c9ea876bd4b289c2fd60431"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/zendframework/zend-diactoros/zipball/c6c87c2772de8f4b1c9ea876bd4b289c2fd60431",
+                "reference": "c6c87c2772de8f4b1c9ea876bd4b289c2fd60431",
+                "shasum": ""
+            },
+            "require": {
+                "php": "^7.1",
+                "psr/http-factory": "^1.0",
+                "psr/http-message": "^1.0"
+            },
+            "type": "library",
+            "license": [
+                "BSD-3-Clause"
+            ],
+            "description": "PSR HTTP Message implementations",
+            "time": "2019-11-13T19:16:13+00:00",
+            "abandoned": "laminas/laminas-diactoros"
+        }
+    ],
+    "packages-dev": [
+        {
+            "name": "fzaninotto/faker",
+            "version": "v1.9.2",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/fzaninotto/faker.git",
+                "reference": "a1e8986c0718d8697d0e33f116becf2391063e32"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/fzaninotto/faker/zipball/a1e8986c0718d8697d0e33f116becf2391063e32",
+                "reference": "a1e8986c0718d8697d0e33f116becf2391063e32",
+                "shasum": ""
+            },
+            "require": {
+                "php": "^5.3.3 || ^7.0"
+            },
+            "type": "library",
+            "license": [
+                "MIT"
+            ],
+            "description": "Faker is a PHP library that generates fake data for you.",
+            "time": "2020-12-11T09:56:16+00:00",
+            "abandoned": true
+        },
+        {
+            "name": "phpunit/phpunit",
+            "version": "7.5.20",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/phpunit/phpunit.git",
+                "reference": "240e609fec98ab457ab758613d7deef00ea85c3e"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/phpunit/phpunit/zipball/240e609fec98ab457ab758613d7deef00ea85c3e",
+                "reference": "240e609fec98ab457ab758613d7deef00ea85c3e",
+                "shasum": ""
+            },
+            "require": {
+                "ext-dom": "*",
+                "ext-json": "*",
+                "ext-libxml": "*",
+                "ext-mbstring": "*",
+                "ext-xml": "*",
+                "php": "^7.1",
+                "phpunit/php-code-coverage": "^6.0.7",
+                "sebastian/version": "^2.0.1"
+            },
+            "type": "library",
+            "license": [
+                "BSD-3-Clause"
+            ],
+            "description": "The PHP Unit Testing framework.",
+            "time": "2020-01-08T08:45:45+00:00"
+        }
+    ],
+    "aliases": [],
+    "minimum-stability": "stable",
+    "stability-flags": {},
+    "prefer-stable": true,
+    "prefer-lowest": false,
+    "platform": {
+        "php": "^7.2",
+        "ext-mbstring": "*",
+        "ext-pdo": "*"
+    },
+    "platform-dev": {},
+    "platform-overrides": {
+        "php": "7.4.33"
+    },
+    "plugin-api-version": "2.3.0"
+}

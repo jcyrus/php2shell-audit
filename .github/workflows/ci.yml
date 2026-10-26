@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.0', '7.1', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: none
+          extensions: json, pcre
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      - name: Dogfood (vulnerable fixtures must fail the CI gate)
+        run: |
+          set +e
+          php bin/php2shell-audit --ci --no-color --no-discover \
+            --ini=tests/fixtures/vulnerable-php74.ini \
+            --fpm-conf=tests/fixtures/vulnerable-www.conf \
+            --path=tests/fixtures/legacy-composer.lock \
+            --php-version=7.4.33 > /dev/null
+          code=$?
+          set -e
+          test "$code" -eq 1
+
+      - name: Dogfood (shipped hardening config must pass the CI gate)
+        run: |
+          php bin/php2shell-audit --ci --no-color --no-discover \
+            --ini=configs/php-fpm-hardening.ini \
+            --path=tests/fixtures --php-version=8.4.27 > /dev/null
+
+  json-validate:
+    name: Validate shipped JSON configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cloudflare-waf-rules.json parses
+        run: python3 -m json.tool configs/cloudflare-waf-rules.json > /dev/null

@@ -1,0 +1,5 @@
+# Audit exports can contain private package names; never commit them by accident.
+audit-summary.json
+*.audit.json
+/vendor/
+.DS_Store
