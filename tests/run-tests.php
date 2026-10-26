@@ -5,7 +5,7 @@ declare(strict_types=1);
  * Zero-dependency test runner for php2shell-audit (PHP 7.0 – 8.5).
  * Usage: php tests/run-tests.php
  *
- * Copyright (c) 2026, John Cyrus Mantec Espiritu (@jcyrus28)
+ * Copyright (c) 2026, John Cyrus Mantec Espiritu (@jcyrus)
  * SPDX-License-Identifier: BSD-3-Clause
  */
 

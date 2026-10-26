@@ -1,7 +1,7 @@
 {
   "_meta": {
     "name": "php2shell containment rules (CVE-2026-109618 / CVE-2026-109619)",
-    "source": "https://github.com/jcyrus28/php2shell-audit",
+    "source": "https://github.com/jcyrus/php2shell-audit",
     "license": "BSD-3-Clause",
     "notes": [
       "Containment only. Patch to PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12+ or a vendor backport.",

@@ -5,7 +5,7 @@
  * php2shell-audit — read-only exposure & upgrade-readiness auditor for
  * php2shell (CVE-2026-109618 / CVE-2026-109619).
  *
- * Copyright (c) 2026, John Cyrus Mantec Espiritu (@jcyrus28)
+ * Copyright (c) 2026, John Cyrus Mantec Espiritu (@jcyrus)
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Guarantees:
@@ -28,7 +28,7 @@ if (!defined('STDERR')) {
 
 const P2S_VERSION = '1.0.0';
 const P2S_SCHEMA_VERSION = '1.0';
-const P2S_REPO_URL = 'https://github.com/jcyrus28/php2shell-audit';
+const P2S_REPO_URL = 'https://github.com/jcyrus/php2shell-audit';
 
 // First upstream releases containing fixes for both CVEs (released 2026-10-21).
 const P2S_PATCHED_BASELINES = array(
@@ -1513,7 +1513,7 @@ function p2s_render_text(P2S_Report $r, $color)
         '5. Share safely: php2shell-audit --json > audit-summary.json',
         '   (anonymized: no hostnames, paths or environment values)',
         '--',
-        'Containment sprint: @jcyrus28 · docs/SPRINT_OVERVIEW.md',
+        'Containment sprint: @jcyrus · docs/SPRINT_OVERVIEW.md',
         P2S_REPO_URL,
     );
     $out[] = p2s_box($next, $color, '32');

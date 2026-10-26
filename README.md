@@ -3,7 +3,7 @@
 [![PHP 7.0–8.5](https://img.shields.io/badge/PHP-7.0%E2%80%938.5-777BB4?logo=php&logoColor=white)](#compatibility)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](composer.json)
-[![CI](https://github.com/jcyrus28/php2shell-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/jcyrus28/php2shell-audit/actions/workflows/ci.yml)
+[![CI](https://github.com/jcyrus/php2shell-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/jcyrus/php2shell-audit/actions/workflows/ci.yml)
 
 **A read-only, zero-dependency auditor for php2shell exposure.** php2shell is the pair
 CVE-2026-109618 and CVE-2026-109619 (CVSS 9.2, pre-authentication RCE), patched in PHP 8.2.35,
@@ -20,7 +20,7 @@ network calls, writes files, executes shell commands or sends payloads.
 
 ```bash
 # Download, read, run (works on PHP 7.0 – 8.5)
-curl -fsSLo php2shell-audit https://raw.githubusercontent.com/jcyrus28/php2shell-audit/main/bin/php2shell-audit
+curl -fsSLo php2shell-audit https://raw.githubusercontent.com/jcyrus/php2shell-audit/main/bin/php2shell-audit
 less php2shell-audit
 php php2shell-audit --path=/var/www/app
 ```
@@ -49,15 +49,15 @@ Other ways to run it:
 
 ```bash
 # From a clone
-git clone https://github.com/jcyrus28/php2shell-audit && cd php2shell-audit
+git clone https://github.com/jcyrus/php2shell-audit && cd php2shell-audit
 php bin/php2shell-audit --path=/var/www/app
 
 # Composer (global)
-composer global require jcyrus28/php2shell-audit
+composer global require jcyrus/php2shell-audit
 php2shell-audit --path=/var/www/app
 
 # Piped (PHP 7.4+; PHP 7.0–7.3 echo the shebang line when reading a script from stdin)
-curl -fsSL https://raw.githubusercontent.com/jcyrus28/php2shell-audit/main/bin/php2shell-audit | php -- --json
+curl -fsSL https://raw.githubusercontent.com/jcyrus/php2shell-audit/main/bin/php2shell-audit | php -- --json
 ```
 
 ## Example output
@@ -309,9 +309,9 @@ php bin/php2shell-audit --path=/var/www/app \
 ```
 
 Review the file. It contains no hostnames, paths or environment values. Then send it to
-**Cyrus Espiritu ([@jcyrus28](https://github.com/jcyrus28))**, Principal Systems & Platform
+**Cyrus Espiritu ([@jcyrus](https://github.com/jcyrus))**, Principal Systems & Platform
 Modernization Architect.
 
 ## License
 
-[BSD 3-Clause](LICENSE) © 2026 John Cyrus Mantec Espiritu (@jcyrus28)
+[BSD 3-Clause](LICENSE) © 2026 John Cyrus Mantec Espiritu (@jcyrus)

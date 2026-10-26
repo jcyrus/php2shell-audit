@@ -1,6 +1,6 @@
 # 72-Hour php2shell Containment & Strangler Fig Readiness Sprint
 
-**Fixed scope · $3,000 flat fee · Delivered by Cyrus Espiritu ([@jcyrus28](https://github.com/jcyrus28)),
+**Fixed scope · $3,000 flat fee · Delivered by Cyrus Espiritu ([@jcyrus](https://github.com/jcyrus)),
 Principal Systems & Platform Modernization Architect**
 
 ---
@@ -89,7 +89,7 @@ Goal: a reviewed, decision-ready architecture plan.
    ```
    The JSON is anonymized: no hostnames, absolute paths or environment values. Package names
    are kept so blockers can be assessed. Read it before you send it.
-2. **Send `audit-summary.json` to [@jcyrus28](https://github.com/jcyrus28)** with your
+2. **Send `audit-summary.json` to [@jcyrus](https://github.com/jcyrus)** with your
    preferred start date. You'll get a scoped confirmation within one business day.
 3. **Kick off.** We hold a 30-minute call, you grant read-only access (config exports and a
    code snapshot), and the 72-hour clock starts.
@@ -125,4 +125,4 @@ team owns.
 ---
 
 **Start here:** `php bin/php2shell-audit --json > audit-summary.json`, then contact
-[@jcyrus28](https://github.com/jcyrus28).
+[@jcyrus](https://github.com/jcyrus).

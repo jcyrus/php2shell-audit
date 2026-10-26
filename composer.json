@@ -1,5 +1,5 @@
 {
-    "name": "jcyrus28/php2shell-audit",
+    "name": "jcyrus/php2shell-audit",
     "description": "Read-only, zero-dependency auditor for php2shell (CVE-2026-109618 / CVE-2026-109619) exposure and PHP 8.3/8.4 upgrade readiness.",
     "type": "library",
     "license": "BSD-3-Clause",
@@ -14,17 +14,17 @@
         "legacy",
         "strangler-fig"
     ],
-    "homepage": "https://github.com/jcyrus28/php2shell-audit",
+    "homepage": "https://github.com/jcyrus/php2shell-audit",
     "authors": [
         {
             "name": "John Cyrus Mantec Espiritu",
-            "homepage": "https://github.com/jcyrus28",
+            "homepage": "https://github.com/jcyrus",
             "role": "Maintainer"
         }
     ],
     "support": {
-        "issues": "https://github.com/jcyrus28/php2shell-audit/issues",
-        "source": "https://github.com/jcyrus28/php2shell-audit"
+        "issues": "https://github.com/jcyrus/php2shell-audit/issues",
+        "source": "https://github.com/jcyrus/php2shell-audit"
     },
     "require": {
         "php": ">=7.0",
